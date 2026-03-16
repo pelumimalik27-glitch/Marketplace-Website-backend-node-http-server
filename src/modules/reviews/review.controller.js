@@ -1,10 +1,27 @@
+const mongoose = require("mongoose");
 const reviewSchema = require("./review.schema.js");
 const orderSchema = require("../orders/order.schema");
+const productSchema = require("../products/product.schema");
 
 const ADMIN_ROLES = new Set(["admin", "super_admin"]);
 const isAdmin = (req) => {
   const roles = Array.isArray(req.userData?.roles) ? req.userData.roles : [];
   return roles.some((role) => ADMIN_ROLES.has(String(role || "").toLowerCase()));
+};
+
+const recalcProductRating = async (productId) => {
+  if (!mongoose.Types.ObjectId.isValid(productId)) return;
+  const objectId = new mongoose.Types.ObjectId(productId);
+  const [stats] = await reviewSchema.aggregate([
+    { $match: { product: objectId, status: "active" } },
+    { $group: { _id: "$product", avgRating: { $avg: "$rating" }, count: { $sum: 1 } } },
+  ]);
+  const avgRating = Number(stats?.avgRating || 0);
+  const count = Number(stats?.count || 0);
+  await productSchema.findByIdAndUpdate(objectId, {
+    rating: avgRating,
+    reviews: count,
+  });
 };
 
 const createReview = async (req, res) => {
@@ -50,6 +67,12 @@ const createReview = async (req, res) => {
       comment: String(comment || "").trim(),
       isVerifiedPurchase: true,
     });
+
+    try {
+      await recalcProductRating(product);
+    } catch (_) {
+      // Do not fail review creation if rating aggregation fails.
+    }
 
     return res.status(201).json({
       success: true,
@@ -126,6 +149,14 @@ const updateReview = async (req, res) => {
       new: true,
     });
 
+    if ("rating" in updates || "status" in updates) {
+      try {
+        await recalcProductRating(updated?.product);
+      } catch (_) {
+        // ignore aggregation failures
+      }
+    }
+
     return res.json({
       success: true,
       data: updated,
@@ -151,6 +182,12 @@ const deleteReview = async (req, res) => {
     }
 
     await reviewSchema.findByIdAndDelete(req.params.id);
+
+    try {
+      await recalcProductRating(review?.product);
+    } catch (_) {
+      // ignore aggregation failures
+    }
 
     return res.json({
       success: true,
